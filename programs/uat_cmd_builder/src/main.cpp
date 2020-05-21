@@ -313,6 +313,34 @@ void SaveCommand(Command& command, HWND ownerHwnd)
 	}
 }
 
+void SaveCommandStringToFile(const char* data, HWND ownerHwnd)
+{
+	OPENFILENAME ofn;
+	wchar_t file_name[MAX_PATH];
+
+	ZeroMemory(&ofn, sizeof(ofn));
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = ownerHwnd;
+	ofn.lpstrFile = file_name;
+
+	ofn.lpstrFile[0] = '\0';
+	ofn.nMaxFile = sizeof(file_name);
+	ofn.lpstrFilter = L"All\0*.*\0Text\0*.TXT\0";
+	ofn.nFilterIndex = 1;
+	ofn.lpstrFileTitle = NULL;
+	ofn.nMaxFileTitle = 0;
+	ofn.lpstrInitialDir = NULL;
+	ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+	if(GetSaveFileName(&ofn) == TRUE)
+	{
+		std::ofstream save_file;
+		save_file.open(ofn.lpstrFile, std::ios::out);
+		save_file << data;
+		save_file.close();
+	}
+}
+
 void ShowAboutWindow()
 {
 	ImGui::Begin("About", nullptr);
@@ -551,6 +579,11 @@ int main(int, char**)
 		if (ImGui::Button("Copy to clipboard", { 685.0f, 20.0f }))
 		{
 			ImGui::SetClipboardText(log.begin());
+		}
+
+		if (ImGui::Button("Save commandline to file", { 685.0f, 20.0f }))
+		{
+			SaveCommandStringToFile(log.c_str(), hwnd);
 		}
 
 		ImGui::End();
