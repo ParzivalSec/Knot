@@ -6,6 +6,11 @@
 #include <stdio.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
+#include <windows.h>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+
 #include "../../../shared_libs/dear_imgui/imgui.h"
 #include "../../../shared_libs/dear_imgui/imgui_impl_sdl.h"
 #include "../../../shared_libs/dear_imgui/imgui_impl_dx11.h"
@@ -22,9 +27,304 @@ void CleanupDeviceD3D();
 void CreateRenderTarget();
 void CleanupRenderTarget();
 
+static const char* WINDOW_NAME = "Knot: UE4-AutomationTool-Commandline Builder";
+constexpr uint32_t APP_WIDTH = 700;
+constexpr uint32_t APP_HEIGHT = 800;
+
+enum class BuildConfig : uint8_t
+{
+	Debug,
+	Development,
+	Test,
+	Shipping,
+
+	Count
+};
+
+constexpr char* BuildConfigNames[static_cast<uint8_t>(BuildConfig::Count)] = 
+{ 
+	"Debug",
+	"Development",
+	"Test",
+	"Shipping"
+};
+
+enum class TargetPlatform : uint8_t
+{
+	Win64,
+	PS4,
+	XBoxOne,
+	Switch,
+
+	Count
+};
+
+constexpr char* TargetPlatformNames[static_cast<uint8_t>(TargetPlatform::Count)] = 
+{ 
+	"Win64",
+	"PS4",
+	"XboxOne",
+	"Switch" 
+};
+
+void SerializeString(std::stringstream& ss, const char* data)
+{
+	if (data[0] == '\0')
+	{
+		ss << "EMPTY ";
+	}
+	else
+	{
+		ss << data << " ";
+	}
+}
+
+void DeserializeString(std::stringstream& ss, char* data)
+{
+	std::string val;
+	ss >> val;
+
+	if (strcmp(val.c_str(), "EMPTY") == 0)
+	{
+		data[0] = '\0';
+	}
+	else
+	{
+		memcpy(data, val.c_str(), val.length());
+	}
+}
+
+constexpr uint32_t MAX_STRING_OPTION_LENGTH = 66;
+
+struct Command
+{
+	// general settings
+	char engine_path[MAX_PATH] = { "\0" };
+	char project_name[MAX_STRING_OPTION_LENGTH] = { "\0" };
+	char project_path[MAX_PATH] = { "\0" };
+	char title_id[MAX_STRING_OPTION_LENGTH] = { "\0" };
+
+	// build options
+	bool should_build = false;
+
+	// cooking options
+	bool should_cook = false;
+
+	// stage options
+	bool should_stage = false;
+	bool use_pak_files = false;
+	bool use_mutliple_chunks = false;
+
+	// package options
+	bool should_package = false;
+	bool is_distribution = false;
+	bool should_compress = false;
+
+	// archive options
+	bool should_archive = false;
+	char archive_path[MAX_PATH] = { "\0" };
+
+	BuildConfig build_config = BuildConfig::Debug;
+	TargetPlatform target_platform = TargetPlatform::Win64;
+
+	std::string serialize(void)
+	{
+		std::stringstream ss;
+		SerializeString(ss, engine_path);
+		SerializeString(ss, project_name);
+		SerializeString(ss, project_path);
+		SerializeString(ss, title_id);
+
+		ss << should_build << " ";
+		ss << should_cook << " ";
+		ss << should_stage << " ";
+		ss << use_pak_files << " ";
+		ss << use_mutliple_chunks << " ";
+		
+		ss << should_package << " ";
+		ss << is_distribution << " ";
+		ss << should_compress << " ";
+		
+		ss << should_archive << " ";
+		SerializeString(ss, archive_path);
+
+		ss << static_cast<uint8_t>(build_config) << " ";
+		ss << static_cast<uint8_t>(target_platform) << " ";
+
+		return ss.str();
+	}
+
+	void deserialize(const std::string& data)
+	{
+		std::stringstream ss(data);
+		DeserializeString(ss, engine_path);
+		DeserializeString(ss, project_name);
+		DeserializeString(ss, project_path);
+		DeserializeString(ss, title_id);
+		   
+		ss >> should_build;
+		ss >> should_cook;
+		ss >> should_stage;
+		ss >> use_pak_files;
+		ss >> use_mutliple_chunks;
+
+		ss >> should_package;
+		ss >> is_distribution;
+		ss >> should_compress;
+		   
+		ss >> should_archive;
+		DeserializeString(ss, archive_path);
+		  
+		uint8_t config = 0u;
+		ss >> config;
+		build_config = static_cast<BuildConfig>(config);
+		ss >> config;
+		target_platform = static_cast<TargetPlatform>(config);
+	}
+};
+
+const char* CombinedBuildOptions(const Command& command)
+{
+	return command.should_build ? "-build" : "-skipbuild";
+}
+
+const char* CombinedCookOptions(const Command& command)
+{
+	return command.should_cook ? "-cook" : "-skipcook";
+}
+
+const char* CombinedStageOptions(const Command& command)
+{
+	static char stage_options[29] = { "\0" };
+
+	if (command.should_stage)
+	{
+		const char* pak = command.use_pak_files ? "-pak" : "";
+		const char* chunks = command.use_mutliple_chunks ? "-manifests" : "";
+		const char* compressed = command.should_compress ? "-compressed" : "";
+
+		snprintf(stage_options, 29, "-stage %s %s %s", pak, chunks, compressed);
+		
+		return stage_options;
+	}
+
+	return "-skipstage";
+}
+
+const char* CombinedPackageOptions(const Command& command)
+{
+	if (command.should_package)
+	{
+		if (command.is_distribution)
+		{
+			return "-package -distribution";
+		}
+
+		return "-package";
+	}
+
+	return "";
+}
+
+const char* CombinedArchiveOptions(const Command& command)
+{
+	if (command.should_archive)
+	{
+		static char archive_options[MAX_PATH + 26] = { "\0" };
+		snprintf(archive_options, MAX_PATH + 26, "-archive -archivepath=%s", command.archive_path);
+		return archive_options;
+	}
+
+	return "";
+}
+
+const char* OptionalTitleId(const Command& command)
+{
+	if (command.title_id[0] != '/0')
+	{
+		static char archive_options[MAX_STRING_OPTION_LENGTH + 20] = { "\0" };
+		snprintf(archive_options, MAX_STRING_OPTION_LENGTH + 20, "-TitleId=%s", command.title_id);
+		return archive_options;
+	}
+
+	return "";
+}
+
+void NewCommand(Command& command)
+{
+	command = Command {};
+}
+
+void OpenCommand(Command& command, HWND ownerHwnd)
+{
+	OPENFILENAME ofn;
+	wchar_t file_name[MAX_PATH];
+
+	ZeroMemory(&ofn, sizeof(ofn));
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = ownerHwnd;
+	ofn.lpstrFile = file_name;
+
+	ofn.lpstrFile[0] = '\0';
+	ofn.nMaxFile = sizeof(file_name);
+	ofn.lpstrFilter = L"All\0*.*\0Text\0*.TXT\0";
+	ofn.nFilterIndex = 1;
+	ofn.lpstrFileTitle = NULL;
+	ofn.nMaxFileTitle = 0;
+	ofn.lpstrInitialDir = NULL;
+	ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+	if(GetOpenFileName(&ofn) == TRUE)
+	{
+		std::ifstream save_file;
+		save_file.open(ofn.lpstrFile, std::ios::in);
+		std::string data;
+		std::getline(save_file, data);
+		command.deserialize(data);
+		save_file.close();
+	}
+}
+
+void SaveCommand(Command& command, HWND ownerHwnd)
+{
+	OPENFILENAME ofn;
+	wchar_t file_name[MAX_PATH];
+
+	ZeroMemory(&ofn, sizeof(ofn));
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = ownerHwnd;
+	ofn.lpstrFile = file_name;
+
+	ofn.lpstrFile[0] = '\0';
+	ofn.nMaxFile = sizeof(file_name);
+	ofn.lpstrFilter = L"All\0*.*\0Text\0*.TXT\0";
+	ofn.nFilterIndex = 1;
+	ofn.lpstrFileTitle = NULL;
+	ofn.nMaxFileTitle = 0;
+	ofn.lpstrInitialDir = NULL;
+	ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+	if(GetSaveFileName(&ofn) == TRUE)
+	{
+		std::ofstream save_file;
+		save_file.open(ofn.lpstrFile, std::ios::out);
+		save_file << command.serialize();
+		save_file.close();
+	}
+}
+
+void ShowAboutWindow()
+{
+	ImGui::Begin("About", nullptr);
+
+	ImGui::End();
+}
+
 // Main code
 int main(int, char**)
 {
+	::ShowWindow(::GetConsoleWindow(), SW_HIDE);
+
     // Setup SDL
     // (Some versions of SDL before <2.0.10 appears to have performance/stalling issues on a minority of Windows systems,
     // depending on whether SDL_INIT_GAMECONTROLLER is enabled or disabled.. updating to latest version of SDL is recommended!)
@@ -35,8 +335,8 @@ int main(int, char**)
     }
 
     // Setup window
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Window* window = SDL_CreateWindow("Dear ImGui SDL2+DirectX11 example", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window* window = SDL_CreateWindow(WINDOW_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, APP_WIDTH, APP_HEIGHT, window_flags);
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
@@ -80,9 +380,11 @@ int main(int, char**)
     //IM_ASSERT(font != NULL);
 
     // Our state
-    bool show_demo_window = true;
-    bool show_another_window = false;
-    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
+
+	Command command;
+
+	ImGuiTreeNodeFlags header_flags = ImGuiTreeNodeFlags_DefaultOpen;
 
     // Main loop
     bool done = false;
@@ -115,42 +417,143 @@ int main(int, char**)
         ImGui_ImplSDL2_NewFrame(window);
         ImGui::NewFrame();
 
-        // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
-        if (show_demo_window)
-            ImGui::ShowDemoWindow(&show_demo_window);
+	    ImGuiWindowFlags img_window_flags = 0;
+	    img_window_flags |= ImGuiWindowFlags_NoTitleBar;
+	    img_window_flags |= ImGuiWindowFlags_NoResize;
+	    img_window_flags |= ImGuiWindowFlags_NoScrollbar;
+	    img_window_flags |= ImGuiWindowFlags_MenuBar;
+	    img_window_flags |= ImGuiWindowFlags_NoMove;
+	    img_window_flags |= ImGuiWindowFlags_NoCollapse;
 
-        // 2. Show a simple window that we create ourselves. We use a Begin/End pair to created a named window.
-        {
-            static float f = 0.0f;
-            static int counter = 0;
+	    // We specify a default position/size in case there's no data in the .ini file. Typically this isn't required! We only do it to make the Demo applications a little more welcoming.
+	    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_FirstUseEver);
+	    ImGui::SetNextWindowSize(ImVec2(APP_WIDTH, APP_HEIGHT), ImGuiCond_FirstUseEver);
 
-            ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
+	    // Main body of the Demo window starts here.
+		ImGui::Begin("MainWindow", nullptr, img_window_flags);
 
-            ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-            ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-            ImGui::Checkbox("Another Window", &show_another_window);
+		if (ImGui::BeginMenuBar())
+		{
+			if (ImGui::BeginMenu("File"))
+			{
+				if (ImGui::MenuItem("New")) { NewCommand(command); }
+				if (ImGui::MenuItem("Open")) { OpenCommand(command, hwnd); }
+				if (ImGui::MenuItem("Save")) { SaveCommand(command, hwnd); }
+			
+				ImGui::EndMenu();
+			}
 
-            ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-            ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
+			if (ImGui::MenuItem("About")) { ShowAboutWindow(); }
+			if (ImGui::MenuItem("Exit")) { return 0; }
 
-            if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-                counter++;
-            ImGui::SameLine();
-            ImGui::Text("counter = %d", counter);
+			ImGui::EndMenuBar();
+		}
 
-            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
-            ImGui::End();
-        }
+		if (ImGui::CollapsingHeader("General options", header_flags))
+		{
+			ImGui::InputText("Engine path", command.engine_path, MAX_PATH);
+			ImGui::InputText("Project name", command.project_name, MAX_STRING_OPTION_LENGTH);
+			ImGui::InputText("Project path", command.project_path, MAX_PATH);
 
-        // 3. Show another simple window.
-        if (show_another_window)
-        {
-            ImGui::Begin("Another Window", &show_another_window);   // Pass a pointer to our bool variable (the window will have a closing button that will clear the bool when clicked)
-            ImGui::Text("Hello from another window!");
-            if (ImGui::Button("Close Me"))
-                show_another_window = false;
-            ImGui::End();
-        }
+			static int platform_index = static_cast<int>(command.target_platform);
+			if (ImGui::Combo("Target plaform", &platform_index, "Win64\0PS4\0XBoxOne\0Switch\0"))
+			{
+				switch (platform_index)
+				{
+					case 0: command.target_platform = TargetPlatform::Win64; break;
+					case 1: command.target_platform = TargetPlatform::PS4; break;
+					case 2: command.target_platform = TargetPlatform::XBoxOne; break;
+					case 3: command.target_platform = TargetPlatform::Switch; break;
+				}
+			}
+		}
+
+		if (ImGui::CollapsingHeader("Build options", header_flags))
+		{
+			ImGui::Checkbox("Build", &command.should_build);
+
+			static int configuration_index = static_cast<int>(command.build_config);
+			if (ImGui::Combo("Build configuration", &configuration_index, "Debug\0Development\0Test\0Shipping\0"))
+			{
+				switch (configuration_index)
+				{
+					case 0: command.build_config = BuildConfig::Debug; break;
+					case 1: command.build_config = BuildConfig::Development; break;
+					case 2: command.build_config = BuildConfig::Test; break;
+					case 3: command.build_config = BuildConfig::Shipping; break;
+				}
+			}
+		}
+		
+		if (ImGui::CollapsingHeader("Cook options", header_flags))
+		{
+			ImGui::Checkbox("Cook", &command.should_cook);
+		}
+
+		if (ImGui::CollapsingHeader("Stage options", header_flags))
+		{
+			ImGui::Checkbox("Stage", &command.should_stage);
+
+			if (command.should_stage)
+			{
+				ImGui::Checkbox("Compress assets", &command.should_compress);
+				ImGui::Checkbox("Use .pak files", &command.use_pak_files);
+
+				if (command.use_pak_files)
+				{
+					ImGui::Checkbox("Use multiple chunks", &command.use_mutliple_chunks);
+				}
+			}
+		}
+
+		if (ImGui::CollapsingHeader("Packaging options", header_flags))
+		{
+			ImGui::Checkbox("Package project", &command.should_package);
+			ImGui::Checkbox("Build distribution version", &command.is_distribution);
+		}
+
+		if (ImGui::CollapsingHeader("Archive options", header_flags))
+		{
+			ImGui::Checkbox("Archive project", &command.should_archive);
+			ImGui::InputText("Archive path", command.archive_path, MAX_PATH);
+		}
+
+		if (command.target_platform == TargetPlatform::PS4)
+		{
+			if (ImGui::CollapsingHeader("PS4", header_flags))
+			{
+				ImGui::InputText("TitleID", command.title_id, MAX_STRING_OPTION_LENGTH);
+			}
+		}
+
+		ImGui::Separator();
+
+		ImGuiTextBuffer log;
+		log.appendf("%s/Engine/Build/BatchFiles/RunUAT.bat BuildCookRun -project=%s/%s.uproject -platform=%s -clientconfig=%s -serverconfig=%s %s -noP4 %s %s %s %s %s", 
+			command.engine_path,
+			command.project_path,
+			command.project_name,
+			TargetPlatformNames[static_cast<uint8_t>(command.target_platform)],
+			BuildConfigNames[static_cast<uint8_t>(command.build_config)],
+			BuildConfigNames[static_cast<uint8_t>(command.build_config)],
+			OptionalTitleId(command),
+			CombinedBuildOptions(command),
+			CombinedCookOptions(command),
+			CombinedStageOptions(command),
+			CombinedPackageOptions(command),
+			CombinedArchiveOptions(command)
+			);
+
+		ImGui::TextWrapped(log.begin());
+		
+		ImGui::Separator();
+
+		if (ImGui::Button("Copy to clipboard", { 685.0f, 20.0f }))
+		{
+			ImGui::SetClipboardText(log.begin());
+		}
+
+		ImGui::End();
 
         // Rendering
         ImGui::Render();
@@ -159,7 +562,6 @@ int main(int, char**)
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
         g_pSwapChain->Present(1, 0); // Present with vsync
-        //g_pSwapChain->Present(0, 0); // Present without vsync
     }
 
     // Cleanup
